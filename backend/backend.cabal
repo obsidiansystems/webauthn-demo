@@ -1,0 +1,45 @@
+name: backend
+version: 0.1
+cabal-version: >= 1.8
+build-type: Simple
+
+library
+  hs-source-dirs: src
+  if impl(ghcjs)
+    buildable: False
+  build-depends: aeson-gadt-th
+               , base
+               , base64-bytestring
+               , beam-automigrate
+               , beam-core
+               , beam-postgres
+               , bytestring
+               , common
+               , containers
+               , cryptonite
+               , frontend
+               , gargoyle-postgresql-connect
+               , hourglass
+               , lens
+               , obelisk-backend
+               , obelisk-route
+               , resource-pool
+               , snap-core
+               , snap-extras
+               , validation
+               , webauthn >= 0.1.0.0
+  exposed-modules:
+    Backend
+  ghc-options: -Wall -Wredundant-constraints -Wincomplete-uni-patterns -Wincomplete-record-updates -O -fno-show-valid-hole-fits
+
+executable backend
+  main-is: main.hs
+  hs-source-dirs: src-bin
+  ghc-options: -Wall -Wredundant-constraints -Wincomplete-uni-patterns -Wincomplete-record-updates -O -threaded -fno-show-valid-hole-fits
+  if impl(ghcjs)
+    buildable: False
+  build-depends: base
+               , backend
+               , common
+               , frontend
+               , obelisk-backend
