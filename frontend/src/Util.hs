@@ -9,13 +9,11 @@ module Util where
 
 import Control.Lens
 import Control.Monad
-import qualified Crypto.WebAuthn as WA
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Base64.URL as B64
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import GHC.Generics
 import Language.Javascript.JSaddle
 import Reflex.Dom.Core hiding (Error)
 
@@ -24,25 +22,26 @@ import Common.Api
 s :: String -> String
 s = id
 
+consoleLog :: (MonadJSM m, ToJSVal a0) => a0 -> m ()
 consoleLog t = liftJSM $ do
   console <- jsg $ T.pack "console"
-  console ^. js1 (T.pack "log") t
-  pure ()
+  void $ console ^. js1 (T.pack "log") t
 
+toArrayBuffer :: ToJSVal value => value -> JSM (Either String (JSM JSVal))
 toArrayBuffer strVal = do
   bstrEither <- B64.decode . T.encodeUtf8 <$> valToText strVal
   pure $ bstrEither <&> \bstr -> do
     jsArray <- toJSValListOf $ B.unpack $ B.fromStrict bstr
     new (jsg $ s "Uint8Array") jsArray
 
-replacePropWithByteBuffer :: _ => Object -> String -> m Object
+replacePropWithByteBuffer :: (MonadJSM m) => Object -> String -> m ()
 replacePropWithByteBuffer someObj propName = liftJSM $ do
   propVal <- someObj ^. js propName
   eitherBuffer <- toArrayBuffer propVal
   forM_ eitherBuffer $ \buf ->
     objSetPropertyByName someObj propName buf
-  pure someObj
 
+toBase64UrlString :: MakeArgs args => args -> JSM T.Text
 toBase64UrlString propVal = do
   uint8Array <- new (jsg $ s "Uint8Array") propVal
   bytes <- B.toStrict . B.pack <$> fromJSValUncheckedListOf uint8Array
@@ -60,8 +59,8 @@ copyPropertyWithModification f oldObj newObj propName = liftJSM $ do
   newPropVal <- f propVal
   objSetPropertyByName newObj propName $ if isPropNull then pure propVal else toJSVal newPropVal
 
--- decodeCredentialOptions credOpts = do
 
+getNavigatorCredentials :: JSM (Maybe JSVal)
 getNavigatorCredentials = do
   nav <- jsg $ s "navigator"
   creds <- nav ^. js (s "credentials")
@@ -70,11 +69,16 @@ getNavigatorCredentials = do
     then Nothing
     else Just creds
 
+jsThen :: (MonadJSM m, MakeObject s) => s -> (JSVal -> JSM ()) -> m JSVal
 jsThen promise accept = liftJSM $ do
   promise ^. js1 (s "then") (fun $ \_ _ [result] -> do
     accept result)
 
-postJSONRequest :: _ => T.Text -> Event t T.Text -> m (Event t T.Text, Event t T.Text)
+postJSONRequest
+  :: (MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m)
+  => T.Text
+  -> Event t T.Text
+  -> m (Event t T.Text, Event t T.Text)
 postJSONRequest url postDataEv = do
   let
     xhrEv = postDataEv <&> \postData ->
@@ -94,10 +98,12 @@ postJSONRequest url postDataEv = do
         -- We successfully parsed the json as an error, this means we got an error!!
         Right (Error err) -> Left err
 
+jsonParse :: ToJSVal a0 => a0 -> JSM Object
 jsonParse jsonText = do
   json <- jsg $ s "JSON"
   json ^. js1 (s "parse") jsonText >>= makeObject
 
+jsonStringify :: ToJSVal a0 => a0 -> JSM T.Text
 jsonStringify object = do
   json <- jsg $ s "JSON"
   json ^. js1 (s "stringify") object >>= valToText
@@ -106,10 +112,12 @@ data AuthenticatorResponseType
   = Attestation   -- Registration
   | Assertion     -- Login
 
+getPropsByAuthenticatorResponseType :: AuthenticatorResponseType -> [String]
 getPropsByAuthenticatorResponseType = \case
   Attestation -> ["attestationObject", "clientDataJSON"]
   Assertion -> ["authenticatorData", "clientDataJSON", "signature", "userHandle"]
 
+encodeBase64PublicKeyCredential :: Object -> AuthenticatorResponseType -> JSM Object
 encodeBase64PublicKeyCredential pkCredsObj authRespType = do
   newObj <- create
 
@@ -129,10 +137,9 @@ encodeBase64PublicKeyCredential pkCredsObj authRespType = do
 
   pure newObj
 
+encodeBase64AuthenticatorResponse :: Object -> AuthenticatorResponseType -> JSM Object
 encodeBase64AuthenticatorResponse responseObj authRespType = do
   newResponseObj <- create
-  -- responseObj <- objGetPropertyByName pkCredsObj (s "response") >>= makeObject
   forM_ (getPropsByAuthenticatorResponseType authRespType) $ \prop ->
     copyPropertyWithModification toBase64UrlString responseObj newResponseObj prop
-  -- copyPropertyWithModification toBase64UrlString responseObj newResponseObj 
   pure newResponseObj

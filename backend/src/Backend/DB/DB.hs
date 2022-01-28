@@ -11,7 +11,6 @@ module Backend.DB.DB where
 import Data.Bits as Bits
 import Data.Maybe (isJust)
 import Data.Pool
-import Data.String (fromString)
 import qualified Data.Text as T
 import Data.Word
 import qualified Crypto.WebAuthn as WA

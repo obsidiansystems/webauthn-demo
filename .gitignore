@@ -1,6 +1,7 @@
 .attr-cache
 .cabal-sandbox
 *.hi
+.hlint.yaml
 *.o
 cabal.project.local
 cabal.sandbox.config

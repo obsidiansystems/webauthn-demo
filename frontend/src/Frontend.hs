@@ -11,10 +11,8 @@
 module Frontend where
 
 import Control.Monad
-import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Control.Lens
-import qualified Crypto.WebAuthn as WA
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Text as T
@@ -22,7 +20,6 @@ import qualified Data.Text.Encoding as T
 import Language.Javascript.JSaddle
 
 import Obelisk.Frontend
-import Obelisk.Configs
 import Obelisk.Route
 import Obelisk.Route.Frontend
 import Obelisk.Generated.Static
@@ -47,10 +44,9 @@ frontend = Frontend
         FrontendRoute_Main -> prerender_ blank frontendMain
   }
 
-frontendMain :: 
-  -- (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, MonadJSM (Performable m)) =>
-  _ =>
-  RoutedT t () m ()
+frontendMain
+  :: (DomBuilder t m, MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m, MonadHold t m)
+  => RoutedT t () m ()
 frontendMain = do
 
   -- Create an input element for receiving username
@@ -59,12 +55,12 @@ frontendMain = do
       .~ "placeholder" =: "Enter username"
     )
 
-  attestationDyn <- el "div" $ do
+  void $ el "div" $ do
     text "Attestation Type"
     (e, _) <- selectElement def $ mapM (el "option" . text) ["None", "Indirect", "Direct"]
     pure $ _selectElement_value e
 
-  authenticatorDyn <- el "div" $ do
+  void $ el "div" $ do
     text "Authenticator Type"
     (e, _) <- selectElement def $ mapM (el "option" . text) ["Unspecified", "Cross Platform", "Platform (TPM)"]
     pure $ _selectElement_value e
@@ -91,15 +87,20 @@ frontendMain = do
   -- widgetHold_ blank $ leftmost [errorEv, outputEv]
 
   -- myDyn <- holdDyn "" $ leftmost [registerEv, loginEv]
-  el "h1" $ widgetHold blank $ leftmost [errorEv, outputEv]
+  void $ el "h1" $ widgetHold blank $ leftmost [errorEv, outputEv]
   pure ()
 
+setupRegisterWorkflow
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  => Event t a
+  -> Dynamic t T.Text
+  -> m (Event t T.Text, Event t T.Text)
 setupRegisterWorkflow clickEv textDyn = do
   (pkCredJsonEv, sendPkCredJSON) <- newTriggerEvent
 
-  (registerBeginErrorEv, registerBeginEv) <- postJSONRequest "/register/begin" $ T.decodeUtf8 . B.toStrict . A.encode . LoginData <$> tag (current textDyn) clickEv
+  (registerBeginErrorEv, registerBeginEv) <- postJSONRequest "/webauthn/register/begin" $ T.decodeUtf8 . B.toStrict . A.encode . LoginData <$> tag (current textDyn) clickEv
 
-  performEvent $ ffor registerBeginEv $ \jsonText -> liftJSM $ do
+  void $ performEvent $ ffor registerBeginEv $ \jsonText -> liftJSM $ do
     credentialOptionsObj <- jsonParse jsonText
 
     replacePropWithByteBuffer credentialOptionsObj "challenge"
@@ -122,20 +123,25 @@ setupRegisterWorkflow clickEv textDyn = do
 
           liftIO $ sendPkCredJSON str
           )
-  (registerCompleteErrorEv, registerCompleteEv) <- postJSONRequest "/register/complete" pkCredJsonEv
+  (registerCompleteErrorEv, registerCompleteEv) <- postJSONRequest "/webauthn/register/complete" pkCredJsonEv
   pure (leftmost [registerBeginErrorEv, registerCompleteErrorEv], registerCompleteEv)
 
+setupLoginWorkflow
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  => Event t a
+  -> Dynamic t T.Text
+  -> m (Event t T.Text, Event t T.Text)
 setupLoginWorkflow clickEv textDyn = do
   (pkCredJsonEv, sendPkCredJson) <- newTriggerEvent
 
-  (loginBeginErrorEv, loginBeginEv) <- postJSONRequest "/login/begin" $ T.decodeUtf8 . B.toStrict . A.encode . LoginData <$> tag (current textDyn) clickEv
+  (loginBeginErrorEv, loginBeginEv) <- postJSONRequest "/webauthn/login/begin" $ T.decodeUtf8 . B.toStrict . A.encode . LoginData <$> tag (current textDyn) clickEv
 
-  performEvent $ ffor loginBeginEv $ \credReqJson -> liftJSM $ do
+  void $ performEvent $ ffor loginBeginEv $ \credReqJson -> liftJSM $ do
     credReq <- jsonParse credReqJson
-    credReq <- replacePropWithByteBuffer credReq "challenge"
+    replacePropWithByteBuffer credReq "challenge"
 
     (allowCreds :: [JSVal]) <- objGetPropertyByName credReq ("allowCredentials" :: String) >>= fromJSValUncheckedListOf
-    allowCreds <- forM allowCreds $ \allowCred -> do
+    forM_ allowCreds $ \allowCred -> do
       allowCredObj <- makeObject allowCred
       replacePropWithByteBuffer allowCredObj "id"
 
@@ -155,5 +161,5 @@ setupLoginWorkflow clickEv textDyn = do
         liftIO $ sendPkCredJson str
         )
 
-  (loginCompleteErrorEv, loginCompleteEv) <- postJSONRequest "/login/complete" pkCredJsonEv
+  (loginCompleteErrorEv, loginCompleteEv) <- postJSONRequest "/webauthn/login/complete" pkCredJsonEv
   pure (leftmost [loginBeginErrorEv, loginCompleteErrorEv], loginCompleteEv)

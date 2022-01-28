@@ -29,9 +29,7 @@ data BackendRoute :: * -> * where
   BackendRoute_Missing :: BackendRoute ()
   -- You can define any routes that will be handled specially by the backend here.
   -- i.e. These do not serve the frontend, but do something different, such as serving static files.
-  BackendRoute_Register :: BackendRoute RegisterRoute
-
-  BackendRoute_Login :: BackendRoute LoginRoute
+  BackendRoute_WebAuthn :: BackendRoute (R WebAuthnRoute)
 
 data RegisterRoute
   = RegisterRoute_Begin
@@ -57,6 +55,17 @@ loginRouteEncoder = enumEncoder $ \case
   LoginRoute_Begin -> (["begin"], mempty)
   LoginRoute_Complete -> (["complete"], mempty)
 
+data WebAuthnRoute :: * -> * where
+  WebAuthnRoute_Login :: WebAuthnRoute LoginRoute
+  WebAuthnRoute_Register :: WebAuthnRoute RegisterRoute
+
+deriveRouteComponent ''WebAuthnRoute
+
+webauthnRouteEncoder :: Encoder (Either Text) (Either Text) (R WebAuthnRoute) PageName
+webauthnRouteEncoder = pathComponentEncoder $ \case
+  WebAuthnRoute_Register -> PathSegment "register" registerRouteEncoder
+  WebAuthnRoute_Login -> PathSegment "login" loginRouteEncoder
+
 data FrontendRoute :: * -> * where
   FrontendRoute_Main :: FrontendRoute ()
   -- This type is used to define frontend routes, i.e. ones for which the backend will serve the frontend.
@@ -67,8 +76,7 @@ fullRouteEncoder = mkFullRouteEncoder
   (FullRoute_Backend BackendRoute_Missing :/ ())
   (\case
       BackendRoute_Missing -> PathSegment "missing" $ unitEncoder mempty
-      BackendRoute_Register -> PathSegment "register" registerRouteEncoder
-      BackendRoute_Login -> PathSegment "login" loginRouteEncoder)
+      BackendRoute_WebAuthn -> PathSegment "webauthn" webauthnRouteEncoder)
   (\case
       FrontendRoute_Main -> PathEnd $ unitEncoder mempty)
 
