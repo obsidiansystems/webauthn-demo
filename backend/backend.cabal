@@ -32,6 +32,11 @@ library
                , webauthn >= 0.1.0.0
   exposed-modules:
     Backend
+  other-modules:
+    Backend.DB.CredentialEntry
+    Backend.DB.DB
+    Backend.DB.User
+    Backend.Util
   ghc-options: -Wall -Wredundant-constraints -Wincomplete-uni-patterns -Wincomplete-record-updates -O -fno-show-valid-hole-fits
 
 executable backend
