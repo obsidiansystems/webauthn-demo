@@ -12,7 +12,7 @@ in {
   #     config.android_sdk.accept_license = true;
   #   };
   # }).android.frontend;
-  exe = local-self.exe;
-  server = local-self.server;
+  # exe = local-self.exe;
+  # server = local-self.server;
   linuxExe = local-self.linuxExe;
 }
