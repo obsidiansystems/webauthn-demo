@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -41,9 +42,15 @@ frontend = Frontend
       elAttr "link" ("href" =: $(static "main.css") <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
   , _frontend_body = do
       subRoute_ $ \case
-        FrontendRoute_Main -> prerender_ blank frontendMain
+        FrontendRoute_Main ->
+#if defined(ghcjs_HOST_OS)
+          prerender_ blank frontendMain
+#else
+          pure ()
+#endif
   }
 
+#if defined(ghcjs_HOST_OS)
 frontendMain
   :: (DomBuilder t m, MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m, MonadHold t m)
   => RoutedT t () m ()
@@ -163,3 +170,4 @@ setupLoginWorkflow clickEv textDyn = do
 
   (loginCompleteErrorEv, loginCompleteEv) <- postJSONRequest "/webauthn/login/complete" pkCredJsonEv
   pure (leftmost [loginBeginErrorEv, loginCompleteErrorEv], loginCompleteEv)
+#endif
