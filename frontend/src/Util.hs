@@ -19,6 +19,8 @@ import Reflex.Dom.Core hiding (Error)
 
 import Common.Api
 
+#if defined(ghcjs_HOST_OS)
+
 s :: String -> String
 s = id
 
@@ -143,3 +145,5 @@ encodeBase64AuthenticatorResponse responseObj authRespType = do
   forM_ (getPropsByAuthenticatorResponseType authRespType) $ \prop ->
     copyPropertyWithModification toBase64UrlString responseObj newResponseObj prop
   pure newResponseObj
+
+#endif
