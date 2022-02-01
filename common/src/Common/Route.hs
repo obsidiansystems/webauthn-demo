@@ -24,6 +24,8 @@ import Data.Universe
 import Obelisk.Route
 import Obelisk.Route.TH
 
+import Common.Api
+
 data BackendRoute :: * -> * where
   -- | Used to handle unparseable routes.
   BackendRoute_Missing :: BackendRoute ()
@@ -76,7 +78,7 @@ fullRouteEncoder = mkFullRouteEncoder
   (FullRoute_Backend BackendRoute_Missing :/ ())
   (\case
       BackendRoute_Missing -> PathSegment "missing" $ unitEncoder mempty
-      BackendRoute_WebAuthn -> PathSegment "webauthn" webauthnRouteEncoder)
+      BackendRoute_WebAuthn -> PathSegment webAuthnBaseUrl webauthnRouteEncoder)
   (\case
       FrontendRoute_Main -> PathEnd $ unitEncoder mempty)
 

@@ -1,14 +1,19 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
-module Util where
+module Util(
+  setupLoginWorkflow,
+  setupRegisterWorkflow
+) where
 
 import Control.Lens
 import Control.Monad
+import Control.Monad.IO.Class
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Base64.URL as B64
 import qualified Data.ByteString.Lazy as B
@@ -28,17 +33,17 @@ consoleLog t = liftJSM $ do
   console <- jsg $ T.pack "console"
   void $ console ^. js1 (T.pack "log") t
 
-toArrayBuffer :: ToJSVal value => value -> JSM (Either String (JSM JSVal))
-toArrayBuffer strVal = do
+fromBase64UrlString :: ToJSVal value => value -> JSM (Either String (JSM JSVal))
+fromBase64UrlString strVal = do
   bstrEither <- B64.decode . T.encodeUtf8 <$> valToText strVal
   pure $ bstrEither <&> \bstr -> do
     jsArray <- toJSValListOf $ B.unpack $ B.fromStrict bstr
     new (jsg $ s "Uint8Array") jsArray
 
-replacePropWithByteBuffer :: (MonadJSM m) => Object -> String -> m ()
-replacePropWithByteBuffer someObj propName = liftJSM $ do
+decodeBase64Property :: (MonadJSM m) => Object -> String -> m ()
+decodeBase64Property someObj propName = liftJSM $ do
   propVal <- someObj ^. js propName
-  eitherBuffer <- toArrayBuffer propVal
+  eitherBuffer <- fromBase64UrlString propVal
   forM_ eitherBuffer $ \buf ->
     objSetPropertyByName someObj propName buf
 
@@ -79,7 +84,7 @@ postJSONRequest
   :: (MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m)
   => T.Text
   -> Event t T.Text
-  -> m (Event t T.Text, Event t T.Text)
+  -> m (Event t (Either T.Text T.Text))
 postJSONRequest url postDataEv = do
   let
     xhrEv = postDataEv <&> \postData ->
@@ -89,7 +94,7 @@ postJSONRequest url postDataEv = do
   xhrResponseEv <- performRequestAsync xhrEv
   let
     responseTextEv = fmapMaybe _xhrResponse_responseText xhrResponseEv
-  pure $ fanEither $ responseTextEv <&> \jsonText ->
+  pure $ responseTextEv <&> \jsonText ->
     let
       errorEither = A.eitherDecodeStrict' $ T.encodeUtf8 jsonText
     in
@@ -144,3 +149,87 @@ encodeBase64AuthenticatorResponse responseObj authRespType = do
   forM_ (getPropsByAuthenticatorResponseType authRespType) $ \prop ->
     copyPropertyWithModification toBase64UrlString responseObj newResponseObj prop
   pure newResponseObj
+
+encodeToText :: (A.ToJSON a) => a -> T.Text
+encodeToText = T.decodeUtf8 . B.toStrict . A.encode
+
+wrapObjectPublicKey :: Object -> JSM Object
+wrapObjectPublicKey objectToWrap = do
+  wrapperObj <- create
+  objSetPropertyByName wrapperObj (s "publicKey") objectToWrap
+  pure wrapperObj
+
+decodeBase64Options :: AuthenticatorResponseType -> Object -> JSM Object
+decodeBase64Options authRespType credentialOptionsObj = do
+  decodeBase64Property credentialOptionsObj "challenge"
+
+  case authRespType of
+    Attestation -> decodeBase64RegistrationOptions credentialOptionsObj
+    Assertion -> decodeBase64LoginOptions credentialOptionsObj
+
+  wrapObjectPublicKey credentialOptionsObj
+
+decodeBase64RegistrationOptions :: Object -> JSM ()
+decodeBase64RegistrationOptions credentialOptionsObj = do
+  userObj <- objGetPropertyByName credentialOptionsObj (s "user") >>= makeObject
+  decodeBase64Property userObj "id"
+  objSetPropertyByName credentialOptionsObj (s "user") userObj
+
+decodeBase64LoginOptions :: Object -> JSM ()
+decodeBase64LoginOptions credentialOptionsObj = do
+  (allowCreds :: [JSVal]) <- objGetPropertyByName credentialOptionsObj (s "allowCredentials") >>= fromJSValUncheckedListOf
+  forM_ allowCreds $ \allowCred -> do
+    allowCredObj <- makeObject allowCred
+    decodeBase64Property allowCredObj "id"
+
+  objSetPropertyByName credentialOptionsObj (s "allowCredentials") allowCreds
+
+getMethod :: AuthenticatorResponseType -> String
+getMethod = \case
+  Attestation -> "create"
+  Assertion -> "get"
+
+setupWorkflow
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  => T.Text
+  -> AuthenticatorResponseType
+  -> Event t T.Text
+  -> m (Event t (Either T.Text T.Text))
+setupWorkflow baseUrl authRespType usernameEv = do
+  (publicKeyCredentialEv, sendPublicKeyCredentialJson) <- newTriggerEvent
+
+  (workflowBeginErrorEv, workflowBeginEv) <- fmap fanEither $ postJSONRequest (baseUrl <> "/begin") $ encodeToText . LoginData <$> usernameEv
+
+  void $ performEvent $ ffor workflowBeginEv $ \jsonText -> liftJSM $ do
+    credentialOptionsObj <- jsonParse jsonText
+
+    wrapperObj <- decodeBase64Options authRespType credentialOptionsObj
+
+    navCredsMaybe <- getNavigatorCredentials
+    forM_ navCredsMaybe $ \navCreds -> do
+        promise <- navCreds ^. js1 (getMethod authRespType) wrapperObj
+        promise `jsThen` (\pkCreds -> do
+          pkCredsObj <- makeObject pkCreds
+
+          encodedPkCreds <- encodeBase64PublicKeyCredential pkCredsObj authRespType
+
+          str <- jsonStringify encodedPkCreds
+
+          liftIO $ sendPublicKeyCredentialJson str
+          )
+  (workflowCompleteErrorEv, workflowCompleteEv) <- fanEither <$> postJSONRequest (baseUrl <> "/complete") publicKeyCredentialEv
+  pure $ leftmost [Left <$> workflowBeginErrorEv, Left <$> workflowCompleteErrorEv, Right <$> workflowCompleteEv]
+
+setupRegisterWorkflow
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  => T.Text
+  -> Event t T.Text
+  -> m (Event t (Either T.Text T.Text))
+setupRegisterWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/register") Attestation usernameEv
+
+setupLoginWorkflow
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  => T.Text
+  -> Event t T.Text
+  -> m (Event t (Either T.Text T.Text))
+setupLoginWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/login") Assertion usernameEv

@@ -30,5 +30,5 @@ instance A.FromJSON Error where
   parseJSON = A.withObject "Error" $ \o ->
     Error <$> o A..: "error"
 
-commonStuff :: String
-commonStuff = "Here is a string defined in Common.Api"
+webAuthnBaseUrl :: T.Text
+webAuthnBaseUrl = "webauthn"
