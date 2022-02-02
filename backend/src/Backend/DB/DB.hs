@@ -2,12 +2,10 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
--- {-# Language TemplateHaskell #-}
 {-# Language TypeFamilies #-}
 
 module Backend.DB.DB where
 
--- import Control.Lens
 import Data.Bits as Bits
 import Data.Maybe (isJust)
 import Data.Pool
@@ -18,6 +16,7 @@ import qualified Crypto.WebAuthn as WA
 import Database.Beam
 import qualified Database.Beam.AutoMigrate as BA
 import Database.Beam.Postgres
+import qualified Database.PostgreSQL.Simple.Transaction as PT
 
 import Backend.DB.User as U
 import Backend.DB.CredentialEntry as C
@@ -49,9 +48,13 @@ initDb pool = do
   withResource pool $ \dbConn ->
     BA.tryRunMigrationsWithEditUpdate userDbPostgres dbConn
 
+withTransaction :: Pool Connection -> Pg a -> IO a
+withTransaction pool sql = withResource pool $ \conn ->
+  PT.withTransaction conn $ runBeamPostgres conn sql
+
 insertUser :: Pool Connection -> WA.CredentialUserEntity -> IO ()
-insertUser pool WA.CredentialUserEntity {..} = withResource pool $ \conn ->
-  runBeamPostgres conn $ runInsert $
+insertUser pool WA.CredentialUserEntity {..} = withTransaction pool $
+  runInsert $
     insert (users userDb) $ insertValues [user]
   where
     user = UserT
@@ -61,8 +64,8 @@ insertUser pool WA.CredentialUserEntity {..} = withResource pool $ \conn ->
       }
 
 insertCredentialEntry :: Pool Connection -> WA.CredentialEntry -> IO ()
-insertCredentialEntry pool WA.CredentialEntry {..} = withResource pool $ \conn ->
-  runBeamPostgres conn $ runInsert $
+insertCredentialEntry pool WA.CredentialEntry {..} = withTransaction pool $
+  runInsert $
     insert (credentialEntries userDb) $ insertValues [cred]
   where
     cred = C.CredentialEntryT
@@ -74,26 +77,33 @@ insertCredentialEntry pool WA.CredentialEntry {..} = withResource pool $ \conn -
       }
 
 checkIfUserExists :: Pool Connection -> T.Text -> IO Bool
-checkIfUserExists pool username = fmap isJust $ withResource pool $ \conn ->
-  runBeamPostgres conn $ runSelectReturningOne $ select $ do
+checkIfUserExists pool username = fmap isJust $ withTransaction pool $
+  runSelectReturningOne $ select $ do
     user <- all_ (users userDb)
     guard_ (U.accountName user ==. val_ username)
     pure user
 
 getCredentialEntryByUser :: Pool Connection -> T.Text -> IO [WA.CredentialEntry]
-getCredentialEntryByUser pool username = fmap (map toCredentialEntry) $ withResource pool $ \conn ->
-  runBeamPostgres conn $ runSelectReturningList $ select $ do
+getCredentialEntryByUser pool username = fmap (map toCredentialEntry) $ withTransaction pool $
+  runSelectReturningList $ select $ do
     user <- all_ (users userDb)
     credentialEntry <- all_ (credentialEntries userDb)
     guard_ (UserId (U.handle user) ==. C.userHandle credentialEntry &&. U.accountName user ==. val_ username)
     pure credentialEntry
 
 getCredentialEntryByCredentialId :: Pool Connection -> WA.CredentialId -> IO (Maybe WA.CredentialEntry)
-getCredentialEntryByCredentialId pool (WA.CredentialId credId) = fmap (fmap toCredentialEntry) $ withResource pool $ \conn ->
-  runBeamPostgres conn $ runSelectReturningOne $ select $ do
+getCredentialEntryByCredentialId pool (WA.CredentialId credId) = fmap (fmap toCredentialEntry) $ withTransaction pool $
+  runSelectReturningOne $ select $ do
     credentialEntry <- all_ (credentialEntries userDb)
     guard_ (C.credentialId credentialEntry ==. val_ credId)
     pure credentialEntry
+
+updateSignatureCounter :: Pool Connection -> WA.CredentialId -> WA.SignatureCounter -> IO ()
+updateSignatureCounter pool (WA.CredentialId credId) (WA.SignatureCounter counter) = withTransaction pool $
+  runUpdate $
+    update (credentialEntries userDb)
+      (\credEntry -> signCounter credEntry <-. val_ counter)
+      (\credEntry -> credentialId credEntry ==. val_ credId)
 
 toCredentialEntry :: C.CredentialEntry -> WA.CredentialEntry
 toCredentialEntry ce = WA.CredentialEntry

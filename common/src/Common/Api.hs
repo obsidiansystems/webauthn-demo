@@ -1,12 +1,11 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
 
 module Common.Api where
 
 import qualified Data.Aeson as A
+import Data.Aeson.TH
 import qualified Data.Text as T
 
 newtype LoginData = LoginData
@@ -21,14 +20,20 @@ instance A.FromJSON LoginData where
   parseJSON = A.withObject "LoginData" $ \o -> LoginData
     <$> o A..: "name"
 
-newtype Error = Error T.Text
+data Error
+  = Error_Client ClientError
+  | Error_Server ServerError
+  deriving (Eq, Show)
 
-instance A.ToJSON Error where
-  toJSON (Error err) = A.object ["error" A..= err]
+newtype ClientError = ClientError T.Text deriving (Eq, Show)
+newtype ServerError = ServerError T.Text deriving (Eq, Show)
 
-instance A.FromJSON Error where
-  parseJSON = A.withObject "Error" $ \o ->
-    Error <$> o A..: "error"
+deriveJSON defaultOptions ''Error
+deriveJSON defaultOptions ''ClientError
+deriveJSON defaultOptions ''ServerError
+
+newtype BackendResponse = BackendResponse T.Text
+  deriving (Show, A.ToJSON, A.FromJSON)
 
 webAuthnBaseUrl :: T.Text
 webAuthnBaseUrl = "webauthn"

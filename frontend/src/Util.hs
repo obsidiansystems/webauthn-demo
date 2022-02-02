@@ -3,6 +3,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
@@ -14,9 +15,13 @@ module Util(
 import Control.Lens
 import Control.Monad
 import Control.Monad.IO.Class
+import qualified Crypto.WebAuthn.Model.WebIDL.Types as WA
+import qualified Crypto.WebAuthn.WebIDL as WA
 import qualified Data.Aeson as A
-import qualified Data.ByteString.Base64.URL as B64
-import qualified Data.ByteString.Lazy as B
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as LB
+import qualified Data.Map.Strict as M
+import Data.Maybe (catMaybes)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Language.Javascript.JSaddle
@@ -33,38 +38,10 @@ consoleLog t = liftJSM $ do
   console <- jsg $ T.pack "console"
   void $ console ^. js1 (T.pack "log") t
 
-fromBase64UrlString :: ToJSVal value => value -> JSM (Either String (JSM JSVal))
-fromBase64UrlString strVal = do
-  bstrEither <- B64.decode . T.encodeUtf8 <$> valToText strVal
-  pure $ bstrEither <&> \bstr -> do
-    jsArray <- toJSValListOf $ B.unpack $ B.fromStrict bstr
-    new (jsg $ s "Uint8Array") jsArray
-
-decodeBase64Property :: (MonadJSM m) => Object -> String -> m ()
-decodeBase64Property someObj propName = liftJSM $ do
-  propVal <- someObj ^. js propName
-  eitherBuffer <- fromBase64UrlString propVal
-  forM_ eitherBuffer $ \buf ->
-    objSetPropertyByName someObj propName buf
-
-toBase64UrlString :: MakeArgs args => args -> JSM T.Text
-toBase64UrlString propVal = do
-  uint8Array <- new (jsg $ s "Uint8Array") propVal
-  bytes <- B.toStrict . B.pack <$> fromJSValUncheckedListOf uint8Array
-  pure $ T.decodeUtf8 $ B64.encode bytes
-
-copyProperty :: MonadJSM m => Object -> Object -> String -> m ()
-copyProperty = copyPropertyWithModification pure
-
--- copyPropertyWithBase64Url
-
-copyPropertyWithModification :: (ToJSVal a, MonadJSM m) => (JSVal -> JSM a) -> Object -> Object -> String -> m ()
-copyPropertyWithModification f oldObj newObj propName = liftJSM $ do
-  propVal <- objGetPropertyByName oldObj propName
-  isPropNull <- ghcjsPure $ isNull propVal
-  newPropVal <- f propVal
-  objSetPropertyByName newObj propName $ if isPropNull then pure propVal else toJSVal newPropVal
-
+byteStringToArrayBuffer :: B.ByteString -> JSM JSVal
+byteStringToArrayBuffer bytes = do
+  jsArray <- toJSValListOf $ B.unpack bytes
+  new (jsg $ s "Uint8Array") jsArray
 
 getNavigatorCredentials :: JSM (Maybe JSVal)
 getNavigatorCredentials = do
@@ -81,10 +58,10 @@ jsThen promise accept = liftJSM $ do
     accept result)
 
 postJSONRequest
-  :: (MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m)
+  :: (MonadJSM (Performable m), PerformEvent t m, TriggerEvent t m, IsXhrPayload a, A.FromJSON b)
   => T.Text
-  -> Event t T.Text
-  -> m (Event t (Either T.Text T.Text))
+  -> Event t a
+  -> m (Event t (Either Error b))
 postJSONRequest url postDataEv = do
   let
     xhrEv = postDataEv <&> \postData ->
@@ -95,24 +72,91 @@ postJSONRequest url postDataEv = do
   let
     responseTextEv = fmapMaybe _xhrResponse_responseText xhrResponseEv
   pure $ responseTextEv <&> \jsonText ->
-    let
-      errorEither = A.eitherDecodeStrict' $ T.encodeUtf8 jsonText
-    in
-      case errorEither of
-        -- We failed to parse the json as an error, this means we succeeded
-        Left _ -> Right jsonText
-        -- We successfully parsed the json as an error, this means we got an error!!
-        Right (Error err) -> Left err
+    case A.eitherDecodeStrict' $ T.encodeUtf8 jsonText of
+      Left err -> Left $ Error_Client $ ClientError $ T.pack err
+      Right backendResponse ->
+        case backendResponse of
+          Left err -> Left $ Error_Server err
+          Right res -> Right res
 
-jsonParse :: ToJSVal a0 => a0 -> JSM Object
-jsonParse jsonText = do
-  json <- jsg $ s "JSON"
-  json ^. js1 (s "parse") jsonText >>= makeObject
+withObject :: (Object -> JSM ()) -> JSM JSVal
+withObject f = do
+  newObj <- obj
+  f newObj
+  toJSVal newObj
 
-jsonStringify :: ToJSVal a0 => a0 -> JSM T.Text
-jsonStringify object = do
-  json <- jsg $ s "JSON"
-  json ^. js1 (s "stringify") object >>= valToText
+instance ToJSVal WA.PublicKeyCredentialRpEntity where
+  toJSVal (WA.PublicKeyCredentialRpEntity rpId name) = do
+    withObject $ \rpEntity -> do
+      setPropertyMaybe rpEntity "id" rpId
+      setProperty rpEntity "name" name
+
+instance ToJSVal WA.PublicKeyCredentialUserEntity where
+
+instance ToJSVal WA.BufferSource where
+  toJSVal (WA.URLEncodedBase64 bytes) = byteStringToArrayBuffer bytes
+
+instance ToJSVal WA.PublicKeyCredentialParameters where
+  toJSVal (WA.PublicKeyCredentialParameters littype alg) = do
+    withObject $ \credParam -> do
+      setProperty credParam "type" littype
+      setProperty credParam "alg" alg
+
+instance ToJSVal WA.PublicKeyCredentialDescriptor where
+  toJSVal (WA.PublicKeyCredentialDescriptor littype idBytes transports) = do
+    withObject $ \credDesc -> do
+      setProperty credDesc "type" littype
+      setProperty credDesc "id" idBytes
+      setPropertyMaybe credDesc "transports" transports
+
+instance ToJSVal WA.AuthenticatorSelectionCriteria where
+  toJSVal WA.AuthenticatorSelectionCriteria {..} = do
+    withObject $ \authSelect -> do
+      setPropertyMaybe authSelect "authenticatorAttachment" authenticatorAttachment
+      setPropertyMaybe authSelect "residentKey" residentKey
+      setPropertyMaybe authSelect "requireResidentKey" requireResidentKey
+      setPropertyMaybe authSelect "userVerification" userVerification
+
+instance (ToJSString k, ToJSVal v) => ToJSVal (M.Map k v) where
+  toJSVal strictMap = do
+    withObject $ \mapObj -> do
+      forM_ (M.toList strictMap) $ \(key, value) ->
+        objSetPropertyByName mapObj key value
+
+instance ToJSVal WA.PublicKeyCredentialCreationOptions where
+  toJSVal WA.PublicKeyCredentialCreationOptions {..} = do
+    withObject $ \credOpt -> do
+      setProperty credOpt "rp" rp
+      setProperty credOpt "user" user
+      setProperty credOpt "challenge" challenge
+      setProperty credOpt "pubKeyCredParams" pubKeyCredParams
+      setPropertyMaybe credOpt "timeout" timeout
+      setPropertyMaybe credOpt "excludeCredentials" excludeCredentials
+      setPropertyMaybe credOpt "authenticatorSelection" authenticatorSelection
+      setPropertyMaybe credOpt "attestation" attestation
+      setPropertyMaybe credOpt "extensions" extensions
+
+instance ToJSVal WA.PublicKeyCredentialRequestOptions where
+  toJSVal WA.PublicKeyCredentialRequestOptions {..} = do
+    withObject $ \credOpt -> do
+      setProperty credOpt "challenge" challenge
+      setPropertyMaybe credOpt "timeout" timeout
+      setPropertyMaybe credOpt "rpId" rpId
+      setPropertyMaybe credOpt "allowCredentials" allowCredentials
+      setPropertyMaybe credOpt "userVerification" userVerification
+      setPropertyMaybe credOpt "extensions" extensions
+
+getProperty :: (FromJSVal a) => Object -> String -> JSM (Maybe a)
+getProperty ob name = objGetPropertyByName ob name >>= fromJSVal
+
+getFunctionResult :: (FromJSVal a) => Object -> String -> JSM (Maybe a)
+getFunctionResult ob name = ob ^. js0 name >>= fromJSVal
+
+setProperty :: (ToJSVal a) => Object -> String -> a -> JSM ()
+setProperty = objSetPropertyByName
+
+setPropertyMaybe :: (ToJSVal a) => Object -> String -> Maybe a -> JSM ()
+setPropertyMaybe object propName maybeProp = forM_ maybeProp $ setProperty object propName
 
 data AuthenticatorResponseType
   = Attestation   -- Registration
@@ -123,35 +167,8 @@ getPropsByAuthenticatorResponseType = \case
   Attestation -> ["attestationObject", "clientDataJSON"]
   Assertion -> ["authenticatorData", "clientDataJSON", "signature", "userHandle"]
 
-encodeBase64PublicKeyCredential :: Object -> AuthenticatorResponseType -> JSM Object
-encodeBase64PublicKeyCredential pkCredsObj authRespType = do
-  newObj <- create
-
-  -- Copy over properties as is.
-  forM_ ["id", "type"] $ \prop ->
-    copyProperty pkCredsObj newObj prop
-
-  -- Copy property after encoding it to Base 64 url.
-  copyPropertyWithModification toBase64UrlString pkCredsObj newObj "rawId"
-
-  responseObj <- objGetPropertyByName pkCredsObj (s "response") >>= makeObject
-  encodeBase64AuthenticatorResponse responseObj authRespType >>=
-    objSetPropertyByName newObj (s "response")
-
-  pkCredsObj ^. js0 (s "getClientExtensionResults") >>=
-    objSetPropertyByName newObj (s "clientExtensionResults")
-
-  pure newObj
-
-encodeBase64AuthenticatorResponse :: Object -> AuthenticatorResponseType -> JSM Object
-encodeBase64AuthenticatorResponse responseObj authRespType = do
-  newResponseObj <- create
-  forM_ (getPropsByAuthenticatorResponseType authRespType) $ \prop ->
-    copyPropertyWithModification toBase64UrlString responseObj newResponseObj prop
-  pure newResponseObj
-
 encodeToText :: (A.ToJSON a) => a -> T.Text
-encodeToText = T.decodeUtf8 . B.toStrict . A.encode
+encodeToText = T.decodeUtf8 . LB.toStrict . A.encode
 
 wrapObjectPublicKey :: Object -> JSM Object
 wrapObjectPublicKey objectToWrap = do
@@ -159,30 +176,41 @@ wrapObjectPublicKey objectToWrap = do
   objSetPropertyByName wrapperObj (s "publicKey") objectToWrap
   pure wrapperObj
 
-decodeBase64Options :: AuthenticatorResponseType -> Object -> JSM Object
-decodeBase64Options authRespType credentialOptionsObj = do
-  decodeBase64Property credentialOptionsObj "challenge"
+instance FromJSVal WA.BufferSource where
+  fromJSVal value = do
+    uint8Array <- new (jsg $ s "Uint8Array") value
+    fmap (WA.URLEncodedBase64 . B.pack) <$> fromJSValListOf uint8Array
 
-  case authRespType of
-    Attestation -> decodeBase64RegistrationOptions credentialOptionsObj
-    Assertion -> decodeBase64LoginOptions credentialOptionsObj
+instance (FromJSString k, FromJSVal v, Ord k) => FromJSVal (M.Map k v) where
+  fromJSVal value = do
+    keys <- map fromJSString <$> propertyNames value
+    values <- properties value >>= mapM fromJSVal
+    pure $ Just $ M.fromList $ zip keys $ catMaybes values
 
-  wrapObjectPublicKey credentialOptionsObj
+instance FromJSVal response => FromJSVal (WA.PublicKeyCredential response) where
+  fromJSVal value = do
+    object <- makeObject value
+    rawId <- getProperty object "rawId"
+    response <- getProperty object "response"
+    clientExtensionResults <- getFunctionResult object "getClientExtensionResults"
+    pure $ WA.PublicKeyCredential <$> rawId <*> response <*> clientExtensionResults
 
-decodeBase64RegistrationOptions :: Object -> JSM ()
-decodeBase64RegistrationOptions credentialOptionsObj = do
-  userObj <- objGetPropertyByName credentialOptionsObj (s "user") >>= makeObject
-  decodeBase64Property userObj "id"
-  objSetPropertyByName credentialOptionsObj (s "user") userObj
+instance FromJSVal WA.AuthenticatorAttestationResponse where
+  fromJSVal value = do
+    object <- makeObject value
+    clientDataJSON <- getProperty object "clientDataJSON"
+    attestationObject <- getProperty object "attestationObject"
+    transports <- getFunctionResult object "getTransports"
+    pure $ WA.AuthenticatorAttestationResponse <$> clientDataJSON <*> attestationObject <*> transports
 
-decodeBase64LoginOptions :: Object -> JSM ()
-decodeBase64LoginOptions credentialOptionsObj = do
-  (allowCreds :: [JSVal]) <- objGetPropertyByName credentialOptionsObj (s "allowCredentials") >>= fromJSValUncheckedListOf
-  forM_ allowCreds $ \allowCred -> do
-    allowCredObj <- makeObject allowCred
-    decodeBase64Property allowCredObj "id"
-
-  objSetPropertyByName credentialOptionsObj (s "allowCredentials") allowCreds
+instance FromJSVal WA.AuthenticatorAssertionResponse where
+  fromJSVal value = do
+    object <- makeObject value
+    clientDataJSON <- getProperty object "clientDataJSON"
+    authenticatorData <- getProperty object "authenticatorData"
+    signature <- getProperty object "signature"
+    userHandle <- getProperty object "userHandle"
+    pure $ WA.AuthenticatorAssertionResponse <$> clientDataJSON <*> authenticatorData <*> signature <*> userHandle
 
 getMethod :: AuthenticatorResponseType -> String
 getMethod = \case
@@ -190,32 +218,26 @@ getMethod = \case
   Assertion -> "get"
 
 setupWorkflow
-  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
+  :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m), A.FromJSON a, A.ToJSON b)
   => T.Text
   -> AuthenticatorResponseType
   -> Event t T.Text
-  -> m (Event t (Either T.Text T.Text))
-setupWorkflow baseUrl authRespType usernameEv = do
+  -> (a -> JSM JSVal, JSVal -> JSM b)
+  -> m (Event t (Either Error BackendResponse))
+setupWorkflow baseUrl authRespType usernameEv (to, from) = do
   (publicKeyCredentialEv, sendPublicKeyCredentialJson) <- newTriggerEvent
 
   (workflowBeginErrorEv, workflowBeginEv) <- fmap fanEither $ postJSONRequest (baseUrl <> "/begin") $ encodeToText . LoginData <$> usernameEv
 
-  void $ performEvent $ ffor workflowBeginEv $ \jsonText -> liftJSM $ do
-    credentialOptionsObj <- jsonParse jsonText
-
-    wrapperObj <- decodeBase64Options authRespType credentialOptionsObj
-
+  void $ performEvent $ ffor workflowBeginEv $ \credentialOptions -> liftJSM $ do
+    credentialOptionsVal <- to credentialOptions
+    wrapperObj <- wrapObjectPublicKey =<< makeObject credentialOptionsVal
     navCredsMaybe <- getNavigatorCredentials
     forM_ navCredsMaybe $ \navCreds -> do
         promise <- navCreds ^. js1 (getMethod authRespType) wrapperObj
         promise `jsThen` (\pkCreds -> do
-          pkCredsObj <- makeObject pkCreds
-
-          encodedPkCreds <- encodeBase64PublicKeyCredential pkCredsObj authRespType
-
-          str <- jsonStringify encodedPkCreds
-
-          liftIO $ sendPublicKeyCredentialJson str
+          publicKeyCredentials <- from pkCreds
+          liftIO $ sendPublicKeyCredentialJson $ encodeToText publicKeyCredentials
           )
   (workflowCompleteErrorEv, workflowCompleteEv) <- fanEither <$> postJSONRequest (baseUrl <> "/complete") publicKeyCredentialEv
   pure $ leftmost [Left <$> workflowBeginErrorEv, Left <$> workflowCompleteErrorEv, Right <$> workflowCompleteEv]
@@ -224,12 +246,24 @@ setupRegisterWorkflow
   :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
   => T.Text
   -> Event t T.Text
-  -> m (Event t (Either T.Text T.Text))
-setupRegisterWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/register") Attestation usernameEv
+  -> m (Event t (Either Error BackendResponse))
+setupRegisterWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/register") Attestation usernameEv (to, from)
+  where
+    to :: WA.PublicKeyCredentialCreationOptions -> JSM JSVal
+    to = toJSVal
+
+    from :: JSVal -> JSM (WA.PublicKeyCredential WA.AuthenticatorAttestationResponse)
+    from = fromJSValUnchecked
 
 setupLoginWorkflow
   :: (TriggerEvent t m, PerformEvent t m, MonadJSM (Performable m))
   => T.Text
   -> Event t T.Text
-  -> m (Event t (Either T.Text T.Text))
-setupLoginWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/login") Assertion usernameEv
+  -> m (Event t (Either Error BackendResponse))
+setupLoginWorkflow baseUrl usernameEv = setupWorkflow (baseUrl <> "/login") Assertion usernameEv (to, from)
+  where
+    to :: WA.PublicKeyCredentialRequestOptions -> JSM JSVal
+    to = toJSVal
+
+    from :: JSVal -> JSM (WA.PublicKeyCredential WA.AuthenticatorAssertionResponse)
+    from = fromJSValUnchecked

@@ -34,8 +34,14 @@ import Backend.DB.DB
 
 finishWithError :: (MonadSnap m) => T.Text -> m a
 finishWithError err = do
-  writeLBS $ A.encode $ Error err
+  writeLBS $ A.encode $ (Left (ServerError err) :: Either ServerError String)
   getResponse >>= finishWith
+
+sendData :: (MonadSnap m, A.ToJSON a) => a -> m ()
+sendData = writeLBS . A.encode . toRight
+  where
+    toRight :: a -> Either String a
+    toRight = Right
 
 defaultRegistrationOptions :: T.Text -> WA.Challenge -> IO (WA.CredentialOptions 'WA.Registration)
 defaultRegistrationOptions userName challenge = do
@@ -90,7 +96,7 @@ writeOptionsToMVar challenge opts optsMVarMap = do
   putMVar optsMVarMap $ M.insert challenge opts optsMap
 
 webAuthnRouteHandler
-  :: (MonadSnap m, MonadFail m)
+  :: (MonadSnap m)
   => Pool Connection
   -> MVar (M.Map WA.Challenge (WA.CredentialOptions 'WA.Registration))
   -> MVar (M.Map WA.Challenge (WA.CredentialOptions 'WA.Authentication))
@@ -103,6 +109,7 @@ webAuthnRouteHandler pool registerOptionMapVar loginOptionMapVar origin rpIdHash
     RegisterRoute_Begin -> do
       loginDataEither <- getJSON
       case loginDataEither of
+        Left err -> finishWithError $ "Could not read username: " <> T.pack err
         Right (LoginData userName) -> do
           -- Check if there already is a user by this name
           userExists <- liftIO $ checkIfUserExists pool userName
@@ -110,36 +117,33 @@ webAuthnRouteHandler pool registerOptionMapVar loginOptionMapVar origin rpIdHash
           challenge <- liftIO $ WA.generateChallenge
           credOpts <- liftIO $ defaultRegistrationOptions userName challenge
           liftIO $ writeOptionsToMVar challenge credOpts registerOptionMapVar
-          writeLBS $ A.encode $ WA.encodeCredentialOptionsRegistration credOpts
-        _ -> pure ()
+          sendData $ WA.encodeCredentialOptionsRegistration credOpts
+
     RegisterRoute_Complete -> do
       dateTime <- liftIO dateCurrent
 
       credential <- first T.pack <$> getJSON
       cred <- case credential >>= WA.decodeCredentialRegistration WA.allSupportedFormats of
-        Left err -> do
-          fail $ show err
+        Left err -> finishWithError err
         Right result -> pure result
 
       let challenge = WA.ccdChallenge $ WA.arrClientData $ WA.cResponse cred
       registerOptionMap <- liftIO $ takeMVar registerOptionMapVar
       forM_ (M.lookup challenge registerOptionMap) $ \credOpts -> do
         case WA.verifyRegistrationResponse origin rpIdHash mempty dateTime credOpts cred of
-          Failure _ -> pure ()
-          Success registrationResponse -> liftIO $ do
-            insertUser pool $ WA.corUser credOpts
-            insertCredentialEntry pool $ WA.rrEntry registrationResponse
-            pure ()
+          Failure nonEmptyErrorList -> finishWithError $ T.pack $ show nonEmptyErrorList
+          Success registrationResponse -> do
+            liftIO $ do
+              putMVar registerOptionMapVar $ M.delete challenge registerOptionMap
+              insertUser pool $ WA.corUser credOpts
+              insertCredentialEntry pool $ WA.rrEntry registrationResponse
+            sendData $ BackendResponse "You have registered successfully"
 
-        liftIO $ putMVar registerOptionMapVar $ M.delete challenge registerOptionMap
-
-        writeLBS "You have registered successfully"
-        pure ()
   WebAuthnRoute_Login :/ loginRoute -> case loginRoute of
     LoginRoute_Begin -> do
-      usernameEither <- getJSON
-      case usernameEither of
-        Left _ -> finishWithError "Could not read username"
+      loginDataEither <- getJSON
+      case loginDataEither of
+        Left err -> finishWithError $ "Could not read username: " <> T.pack err
         Right (LoginData username) -> do
           liftIO $ print username
           credentials <- liftIO $ getCredentialEntryByUser pool username
@@ -148,13 +152,12 @@ webAuthnRouteHandler pool registerOptionMapVar loginOptionMapVar origin rpIdHash
           challenge <- liftIO WA.generateChallenge
           let credOpts = defaultAuthenticationOptions challenge credentials
           liftIO $ writeOptionsToMVar challenge credOpts loginOptionMapVar
-          writeLBS $ A.encode $ WA.encodeCredentialOptionsAuthentication credOpts
-          pure ()
+          sendData $ WA.encodeCredentialOptionsAuthentication credOpts
+
     LoginRoute_Complete -> do
       credential <- first T.pack <$> getJSON
       cred <- case credential >>= WA.decodeCredentialAuthentication of
-        Left err -> do
-          fail $ show err
+        Left err -> finishWithError $ "Could not decode credential: " <> err
         Right result -> pure result
 
       entryMaybe <- liftIO $ getCredentialEntryByCredentialId pool $ WA.cIdentifier cred
@@ -166,12 +169,15 @@ webAuthnRouteHandler pool registerOptionMapVar loginOptionMapVar origin rpIdHash
       loginOptionMap <- liftIO $ takeMVar loginOptionMapVar
       forM_ (M.lookup challenge loginOptionMap) $ \credOpts -> do
         liftIO $ putMVar loginOptionMapVar $ M.delete challenge loginOptionMap
-        case WA.verifyAuthenticationResponse origin rpIdHash (Just (WA.ceUserHandle entry)) entry credOpts cred of
-          Failure errs{-@(err :| _)-} -> do
-            fail $ show errs
-          Success _ -> do
-            writeLBS "You were logged in."
-            pure ()
+        WA.AuthenticationResult newSigCount <- case WA.verifyAuthenticationResponse origin rpIdHash (Just (WA.ceUserHandle entry)) entry credOpts cred of
+          Failure nonEmptyErrorList -> finishWithError $ T.pack $ show nonEmptyErrorList
+          Success result -> pure result
+        case newSigCount of
+          WA.SignatureCounterZero -> sendData $ BackendResponse "You were logged in."
+          WA.SignatureCounterUpdated counter -> do
+            liftIO $ updateSignatureCounter pool (WA.cIdentifier cred) counter
+            sendData $ BackendResponse "You were logged in."
+          WA.SignatureCounterPotentiallyCloned -> finishWithError "Signature Counter Cloned"
 
 withWebAuthnBackend
   :: ( webAuthnRouteHandler ~ (R WebAuthnRoute -> Snap ())

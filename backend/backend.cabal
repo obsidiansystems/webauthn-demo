@@ -8,7 +8,6 @@ library
   if impl(ghcjs)
     buildable: False
   build-depends: aeson
-               , aeson-gadt-th
                , base
                , base64-bytestring
                , beam-automigrate
@@ -24,6 +23,7 @@ library
                , lens
                , obelisk-backend
                , obelisk-route
+               , postgresql-simple
                , resource-pool
                , snap-core
                , snap-extras

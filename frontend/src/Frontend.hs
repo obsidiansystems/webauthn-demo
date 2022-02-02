@@ -8,6 +8,7 @@ module Frontend where
 
 import Control.Monad
 import Control.Lens
+import Data.Text (pack)
 import Language.Javascript.JSaddle
 
 import Obelisk.Frontend
@@ -54,6 +55,8 @@ frontendMain = do
   loginEv <- setupLoginWorkflow webAuthnBaseUrl textLoginEv
 
   let
-    finalEv = either (divClass "error" . text) (divClass "correct" . text) <$> leftmost [registerEv, loginEv]
+    greenText = divClass "correct" . text . pack . show
+    redText = divClass "error" . text . pack . show
+    finalEv = either redText greenText <$> leftmost [registerEv, loginEv]
 
   void $ el "h1" $ widgetHold blank finalEv
