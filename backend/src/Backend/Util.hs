@@ -28,7 +28,7 @@ import Gargoyle.PostgreSQL.Connect
 import Obelisk.Route.Frontend
 
 import Common.Api
-import Common.Route
+import Common.RouteUtil
 
 import Backend.DB.DB
 

@@ -12,7 +12,7 @@ module Util(
   setupRegisterWorkflow
 ) where
 
-import Control.Lens
+import Control.Lens hiding (to, from)
 import Control.Monad
 import Control.Monad.IO.Class
 import qualified Crypto.WebAuthn.Model.WebIDL.Types as WA
@@ -25,7 +25,7 @@ import Data.Maybe (catMaybes)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Language.Javascript.JSaddle
-import Reflex.Dom.Core hiding (Error)
+import Reflex.Dom.Core hiding (Error, value)
 
 import Common.Api
 
@@ -161,11 +161,6 @@ setPropertyMaybe object propName maybeProp = forM_ maybeProp $ setProperty objec
 data AuthenticatorResponseType
   = Attestation   -- Registration
   | Assertion     -- Login
-
-getPropsByAuthenticatorResponseType :: AuthenticatorResponseType -> [String]
-getPropsByAuthenticatorResponseType = \case
-  Attestation -> ["attestationObject", "clientDataJSON"]
-  Assertion -> ["authenticatorData", "clientDataJSON", "signature", "userHandle"]
 
 encodeToText :: (A.ToJSON a) => a -> T.Text
 encodeToText = T.decodeUtf8 . LB.toStrict . A.encode

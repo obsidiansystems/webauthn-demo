@@ -17,9 +17,7 @@ import Backend.Util
 backend :: Backend BackendRoute FrontendRoute
 backend = Backend
   { _backend_run = withWebAuthnBackend $ \webAuthnRouteHandler -> \case
-      BackendRoute_Missing :/ () -> do
-        writeBS "Does not exist"
-        pure ()
+      BackendRoute_Missing :/ () -> writeBS "Does not exist"
       BackendRoute_WebAuthn :/ webAuthnRoute -> webAuthnRouteHandler webAuthnRoute
   , _backend_routeEncoder = fullRouteEncoder
   }

@@ -7,12 +7,10 @@
 module Frontend where
 
 import Control.Monad
-import Control.Lens
 import Data.Text (pack)
 import Language.Javascript.JSaddle
 
 import Obelisk.Frontend
-import Obelisk.Route
 import Obelisk.Route.Frontend
 import Obelisk.Generated.Static
 
